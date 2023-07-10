@@ -1,5 +1,6 @@
 package com.capacitorjs.plugins.pushnotifications;
 
+import android.Manifest;
 import android.app.Notification;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
@@ -15,18 +16,20 @@ import androidx.core.app.NotificationCompat;
 import com.getcapacitor.*;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
+import com.getcapacitor.annotation.PermissionCallback;
 import com.google.firebase.messaging.FirebaseMessaging;
 import com.google.firebase.messaging.RemoteMessage;
-import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Date;
-import java.util.List;
 import org.json.JSONException;
 import org.json.JSONObject;
 
-
-@CapacitorPlugin(name = "PushNotifications", permissions = @Permission(strings = {}, alias = "receive"))
+@CapacitorPlugin(
+    name = "PushNotifications",
+    permissions = @Permission(strings = { Manifest.permission.POST_NOTIFICATIONS }, alias = PushNotificationsPlugin.PUSH_NOTIFICATIONS)
+)
 public class PushNotificationsPlugin extends Plugin {
+
+    static final String PUSH_NOTIFICATIONS = "receive";
 
     public static Bridge staticBridge = null;
     public static RemoteMessage lastMessage = null;
@@ -59,10 +62,9 @@ public class PushNotificationsPlugin extends Plugin {
             JSObject dataObject = new JSObject();
             for (String key : bundle.keySet()) {
                 if (key.equals("google.message_id")) {
-                    notificationJson.put("id", bundle.get(key));
+                    notificationJson.put("id", bundle.getString(key));
                 } else {
-                    Object value = bundle.get(key);
-                    String valueStr = (value != null) ? value.toString() : null;
+                    String valueStr = bundle.getString(key);
                     dataObject.put(key, valueStr);
                 }
             }
@@ -71,6 +73,30 @@ public class PushNotificationsPlugin extends Plugin {
             actionJson.put("actionId", "tap");
             actionJson.put("notification", notificationJson);
             notifyListeners("pushNotificationActionPerformed", actionJson, true);
+        }
+    }
+
+    @PluginMethod
+    public void checkPermissions(PluginCall call) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            JSObject permissionsResultJSON = new JSObject();
+            permissionsResultJSON.put("receive", "granted");
+            call.resolve(permissionsResultJSON);
+        } else {
+            super.checkPermissions(call);
+        }
+    }
+
+    @PluginMethod
+    public void requestPermissions(PluginCall call) {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            JSObject permissionsResultJSON = new JSObject();
+            permissionsResultJSON.put("receive", "granted");
+            call.resolve(permissionsResultJSON);
+        } else {
+            if (getPermissionState(PUSH_NOTIFICATIONS) != PermissionState.GRANTED) {
+                requestPermissionForAlias(PUSH_NOTIFICATIONS, call, "permissionsCallback");
+            }
         }
     }
 
@@ -89,6 +115,13 @@ public class PushNotificationsPlugin extends Plugin {
                     sendToken(task.getResult());
                 }
             );
+        call.resolve();
+    }
+
+    @PluginMethod
+    public void unregister(PluginCall call) {
+        FirebaseMessaging.getInstance().setAutoInitEnabled(false);
+        FirebaseMessaging.getInstance().deleteToken();
         call.resolve();
     }
 
@@ -114,7 +147,7 @@ public class PushNotificationsPlugin extends Plugin {
                     JSObject extras = new JSObject();
 
                     for (String key : notification.extras.keySet()) {
-                        extras.put(key, notification.extras.get(key));
+                        extras.put(key, notification.extras.getString(key));
                     }
 
                     jsNotif.put("data", extras);
@@ -224,41 +257,46 @@ public class PushNotificationsPlugin extends Plugin {
             if (presentation != null) {
                 if (Arrays.asList(presentation).contains("alert")) {
                     Bundle bundle = null;
-                    try {
-                        ApplicationInfo applicationInfo = getContext()
-                            .getPackageManager()
-                            .getApplicationInfo(getContext().getPackageName(), PackageManager.GET_META_DATA);
-                        bundle = applicationInfo.metaData;
-                    } catch (PackageManager.NameNotFoundException e) {
-                        e.printStackTrace();
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        try {
+                            ApplicationInfo applicationInfo = getContext()
+                                .getPackageManager()
+                                .getApplicationInfo(
+                                    getContext().getPackageName(),
+                                    PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA)
+                                );
+                            bundle = applicationInfo.metaData;
+                        } catch (PackageManager.NameNotFoundException e) {
+                            e.printStackTrace();
+                        }
+                    } else {
+                        bundle = getBundleLegacy();
                     }
+
                     int pushIcon = android.R.drawable.ic_dialog_info;
 
                     if (bundle != null && bundle.getInt("com.google.firebase.messaging.default_notification_icon") != 0) {
                         pushIcon = bundle.getInt("com.google.firebase.messaging.default_notification_icon");
                     }
-
-
-                    int unique = (int) (new Date().getTime()/1000);
                     Intent intent = new Intent(getContext(), getActivity().getClass());
-                                        intent.putExtras(remoteMessage.toIntent().getExtras());
-                                        PendingIntent pendingIntent = PendingIntent.getActivity(
-                                            getContext(),
-                                          unique,
-                                            intent,
-                                            PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE
-                                        );
+                    intent.putExtras(remoteMessage.toIntent().getExtras());
+                    PendingIntent pendingIntent = PendingIntent.getActivity(
+                        getContext(),
+                        generateUniqueId(),
+                        intent,
+                        PendingIntent.FLAG_CANCEL_CURRENT | PendingIntent.FLAG_IMMUTABLE
+                    );
                     NotificationCompat.Builder builder = new NotificationCompat.Builder(
                         getContext(),
                         NotificationChannelManager.FOREGROUND_NOTIFICATION_CHANNEL_ID
                     )
                         .setSmallIcon(pushIcon)
                         .setContentTitle(title)
-                        .setContentText(body)
                         .setAutoCancel(true)
                         .setContentIntent(pendingIntent)
+                        .setContentText(body)
                         .setPriority(NotificationCompat.PRIORITY_DEFAULT);
-                    notificationManager.notify(unique, builder.build());
+                    notificationManager.notify(generateUniqueId(), builder.build());
                 }
             }
             remoteMessageData.put("title", title);
@@ -283,5 +321,27 @@ public class PushNotificationsPlugin extends Plugin {
             return (PushNotificationsPlugin) handle.getInstance();
         }
         return null;
+    }
+
+    @PermissionCallback
+    private void permissionsCallback(PluginCall call) {
+        this.checkPermissions(call);
+    }
+
+    @SuppressWarnings("deprecation")
+    private Bundle getBundleLegacy() {
+        try {
+            ApplicationInfo applicationInfo = getContext()
+                .getPackageManager()
+                .getApplicationInfo(getContext().getPackageName(), PackageManager.GET_META_DATA);
+            return applicationInfo.metaData;
+        } catch (PackageManager.NameNotFoundException e) {
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    private int generateUniqueId() {
+        return (int) (System.currentTimeMillis() % (long) 1e9);
     }
 }
